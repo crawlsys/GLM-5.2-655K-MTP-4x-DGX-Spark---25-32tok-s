@@ -1,4 +1,4 @@
-# GLM-5.2 (unpruned) — 655,360-token context + MTP speculative decoding on 4× NVIDIA DGX Spark
+# GLM-5.2 (unpruned) at 655,360-token context + MTP speculative decoding on 4× NVIDIA DGX Spark
 
 Serve the **unpruned** GLM-5.2 (744B total / 40B active MoE, 256 experts) with a
 **655,360-token context window** and **MTP k=3 speculative decoding** across a
@@ -18,7 +18,13 @@ your own.
 - **Model:** [`QuantTrio/GLM-5.2-Int4-Int8Mix`](https://huggingface.co/QuantTrio/GLM-5.2-Int4-Int8Mix) — unpruned, 744B/40B MoE, 256 experts, compressed-tensors int4/int8 mix, **~405 GB** on disk.
 - **Context:** **655,360 tokens** on 4× GB10 (121 GB unified each). KV cache is sharded 4-way via **decode-context-parallelism (DCP4)**, dtype `fp8_ds_mla`. Boot log reports **`GPU KV cache size: 657,664 tokens`**.
 - **Speculative decoding:** **MTP k=3**, measured acceptance length **~3.0** (66% draft-token acceptance overall; per-position matches Zatz's 0.88 / 0.66 / 0.49).
-- **Measured decode:** **23.0 tok/s** single-stream. Zatz measured throughput **flat to 638,976 tokens of context** on this exact recipe (our own deep-depth bench is pending).
+- **Measured decode:** **23.0 tok/s** single-stream, **47.9 tok/s aggregate at 4 concurrent**. The recipe's author, Zatz, measured decode **flat with depth to 638,976 tokens of context** on this exact recipe (our own deep-depth bench is pending).
+
+> Want max throughput instead of max context? See our companion **200K
+> speed-shape recipe**:
+> [`GLM-5.2-QuantTrio-200K-4x-DGX-Spark`](https://github.com/tonyd2wild/GLM-5.2-QuantTrio-200K-4x-DGX-Spark)
+> — same cluster, same checkpoint, 28.8 tok/s single / 60.5 tok/s aggregate at
+> 200K context. Only one shape runs at a time (both need all 4 nodes).
 
 ### Concurrency (2026-07-05, 512-token generations, temp 0, shallow context)
 
@@ -52,8 +58,9 @@ This repo documents the **DCP4 / 655K** endpoint.
 ## Hardware requirements
 
 - **4× NVIDIA DGX Spark** (GB10, 121 GB unified memory each).
-- **Node-to-node RoCE fabric** — 100 G switch, MTU 9000. We used subnet
-  `192.168.192.0/24`. NCCL runs RDMA over this interface.
+- **Node-to-node RoCE fabric** — 100 G switch, MTU 9000 (jumbo frames)
+  end-to-end. We use a CRS812 switch on subnet `192.168.192.0/24`. NCCL runs
+  RDMA over this interface.
 - **~420 GB free disk per node** for the model weights (they are replicated to
   every node, not shared).
 - Docker with the NVIDIA container runtime on all 4 nodes.
@@ -94,9 +101,9 @@ below live in [`scripts/`](scripts/) and [`patches/`](patches/).
    ```
    (~35–60 min on a Spark.)
 
-2. **Build b12x from source** — the PyPI `b12x` wheel is **missing the
-   sparse-MLA kernels**, so you must build the pinned commit yourself and bake
-   it into the image:
+2. **Install b12x FROM SOURCE** — the PyPI `b12x` wheel is **missing the
+   sparse-MLA kernels**, so you must install the pinned commit yourself and
+   bake it into the image:
 
    ```bash
    git clone https://github.com/voipmonitor/b12x && cd b12x
@@ -104,28 +111,45 @@ below live in [`scripts/`](scripts/) and [`patches/`](patches/).
    pip install --no-deps --force-reinstall .
    ```
 
-3. **Apply the three patches** ([`patches/`](patches/)) inside the image. Each
-   is an idempotent, anchored Python patcher — run all three against the
-   installed vLLM:
+   (Copying the installed `b12x` package directory out of another image that
+   already has it is equivalent — that is in fact what we did.)
+
+3. **Bake the three patches** ([`patches/`](patches/)) into the image. Each is
+   an idempotent, anchored Python patcher — run all three against the installed
+   vLLM. The concrete bake procedure, exactly as we ran it:
 
    ```bash
-   python3 patches/fix-mtp-draft-fused-qkv-mapping.py
-   python3 patches/fix-mla-int32-chunked-prefill.py
-   python3 patches/fix-dsa-indexer-block-table.py
-   ```
+   # start a throwaway container from the freshly built image
+   docker run -d --name zatz-bake --entrypoint sleep vllm-zatz-dcp:probe infinity
 
-4. **Commit the image**, explicitly resetting the entrypoint/CMD — `docker
-   commit` silently **inherits any `--entrypoint` override** from the running
-   container, which is a real trap:
+   # (do the b12x source install from step 2 inside this container)
 
-   ```bash
+   # apply the three patches — NOTE the -i on docker exec
+   for p in fix-mtp-draft-fused-qkv-mapping \
+            fix-mla-int32-chunked-prefill \
+            fix-dsa-indexer-block-table; do
+     docker exec -i zatz-bake python3 - < patches/$p.py
+   done
+
+   # commit, explicitly resetting ENTRYPOINT/CMD
    docker commit \
      --change 'ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]' \
      --change 'CMD []' \
-     <builder-container> vllm-zatz-dcp:probe
+     zatz-bake vllm-zatz-dcp:probe
+   docker rm -f zatz-bake
    ```
 
-5. **Distribute the image** to all 4 nodes:
+   > **Two docker traps that both bit us:**
+   >
+   > 1. `docker commit` silently **inherits `--entrypoint` overrides** from the
+   >    running container — commit without the `--change` lines above and the
+   >    image boots into `sleep`, not vLLM. Always reset `ENTRYPOINT`/`CMD` on
+   >    commit.
+   > 2. When piping stdin scripts into a container, use **`docker exec -i`**.
+   >    Without `-i` the script **silently no-ops** — no error, nothing runs,
+   >    and you commit an unpatched image.
+
+4. **Distribute the image** to all 4 nodes:
 
    ```bash
    docker save vllm-zatz-dcp:probe | ssh <node> docker load   # EDIT: node addr/user
@@ -271,7 +295,9 @@ for the full write-up; summary:
   `rm -rf /tmp/ray-vllm-* /dev/shm/ray*` — or you get `ActorHandleNotFoundError`
   from stale actor handles.
 - **`docker commit` inherits `--entrypoint` overrides** — always reset
-  `ENTRYPOINT`/`CMD` on commit (see step A.4).
+  `ENTRYPOINT`/`CMD` on commit (see step A.3).
+- **`docker exec` needs `-i` for stdin scripts** — without it a piped-in patch
+  script silently no-ops and you commit an unpatched image (see step A.3).
 - **`CUTE_DSL_ARCH` must be `sm_121a`** (not `sm_120a`) on GB10 — `sm_120a`
   errors with CUDA 209.
 - **PyPI `b12x` lacks the sparse-MLA kernels** — build from
