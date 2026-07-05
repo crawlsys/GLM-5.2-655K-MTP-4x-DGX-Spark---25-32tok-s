@@ -1,0 +1,16 @@
+# weights / models — never commit
+*.safetensors
+*.bin
+models/
+*.cid
+
+# logs
+*.log
+
+# python
+__pycache__/
+*.pyc
+
+# editor / OS
+.DS_Store
+*.swp

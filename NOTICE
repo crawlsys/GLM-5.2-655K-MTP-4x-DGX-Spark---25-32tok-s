@@ -1,0 +1,49 @@
+GLM-5.2 655K-context + MTP on 4x DGX Spark
+Copyright 2026 tonyd2wild
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+these files except in compliance with the License. You may obtain a copy of the
+License in the LICENSE file in this repository or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------------
+Attributions
+------------------------------------------------------------------------------
+
+This deployment documentation builds directly on the work of others. The
+patches, scripts, and recipe here are integrations of, and small additions to,
+the following:
+
+- Zatz — the 655K DCP4 serving recipe, the MLA int32 chunked-prefill fix
+  (patches/fix-mla-int32-chunked-prefill.py is his change, verbatim), and the
+  context-vs-prefill dial. NVIDIA developer forum threads 375416 (posts
+  12/13/15) and 374125 (post 112).
+
+- CosmicRaisins — the sm_121 sparse-MLA port, kernels, and foundational
+  GLM-5.2-on-DGX-Spark work. https://github.com/CosmicRaisins/glm-5.2-gb10
+
+- ciprianveg — independent co-discovery of the DSA indexer block-table fix
+  (NVIDIA forum thread 374125 posts 105/107; his mods/fix-dsa-block-table-dim).
+
+- eugr — the spark-vllm-docker image build harness.
+
+- local-inference-lab — the vLLM fork
+  (branch codex/dcp-globaltopk-sharddraft-defaults-20260622) used here.
+
+- voipmonitor — the b12x fork providing the sparse-MLA kernels
+  (built from source at commit 9cd63a72).
+
+- QuantTrio — the GLM-5.2-Int4-Int8Mix compressed-tensors checkpoint.
+  https://huggingface.co/QuantTrio/GLM-5.2-Int4-Int8Mix
+
+The GLM-5.2 model weights are subject to their own upstream license terms; see
+the QuantTrio model card. Nothing here relicenses the model, the vLLM/b12x
+forks, or the forum contributors' work — those remain under their respective
+licenses and are referenced with credit.
+
+New in this repository:
+- patches/fix-mtp-draft-fused-qkv-mapping.py — first published fix enabling MTP
+  speculative decoding on compressed-tensors (int-quantized) GLM-5.2.
+- Independent co-discovery of the indexer block-table fix.
+- First published c1-c6 concurrency numbers for this 655K recipe.
