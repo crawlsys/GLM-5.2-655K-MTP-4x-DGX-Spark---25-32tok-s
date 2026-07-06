@@ -214,6 +214,8 @@ python3 -m vllm.entrypoints.openai.api_server \
   --long-prefill-token-threshold 2048 \
   --gpu-memory-utilization 0.88 \
   --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice \
+  # ^ REQUIRED for agent use — without these the server runs but silently can't
+  #   parse tool calls or separate reasoning from content. See the Gotchas section.
   --hf-overrides '{"use_index_cache":true,"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}' \
   --port 8210 --host 0.0.0.0
 ```
@@ -231,6 +233,12 @@ Notes on key flags:
   caches the sparse indexer output.
 - `--quantization compressed-tensors` — required for this checkpoint (**not**
   `modelopt_fp4`, which the RTX defaults assume).
+- `--reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice`
+  — **REQUIRED for agent/tool-calling use.** Without them the OpenAI endpoint
+  still serves and answers chat, but tool calls aren't parsed and reasoning
+  tokens bleed into `message.content`. See the **⚠️ Tool-calling & reasoning
+  parsers** gotcha below — these are gated behind env vars that default OFF in
+  this repo's `serve.sh`, so they must be set in your env file.
 
 ### Required env vars (every node)
 
@@ -289,6 +297,24 @@ for the full write-up; summary:
 
 ## Gotchas
 
+- **⚠️ Tool-calling & reasoning parsers are opt-in — set them or agents break.**
+  GLM-5.2 needs `--tool-call-parser glm47`, `--reasoning-parser glm45`, and
+  `--enable-auto-tool-choice`. Without them the OpenAI endpoint still serves and
+  answers plain chat, but `tools` / `tool_choice` requests **won't be parsed into
+  tool calls**, and reasoning ("thinking") tokens **bleed into `message.content`**
+  instead of `message.reasoning`. Agent frameworks (Hermes, OpenClaw, OpenCode,
+  etc.) will appear broken even though the server looks healthy.
+  If you drive serving through the recipe/env-file wrapper in this repo, these
+  three are **gated behind env vars that default OFF** in
+  [`scripts/serve.sh`](scripts/serve.sh) — so you **must** set
+  `REASONING_PARSER=glm45`, `TOOL_CALL_PARSER=glm47`, and
+  `ENABLE_AUTO_TOOL_CHOICE=1` in your env file
+  ([`scripts/glm52-qt-dcp4-655k.env`](scripts/glm52-qt-dcp4-655k.env) ships them
+  set). We shipped a 655K server once without them and had to relaunch — hence
+  this warning.
+  **Verify after boot:** `head -2` of the serve log (or the process cmdline)
+  should show all three flags; a quick functional check is a chat request with a
+  simple `tools` array and confirming a `tool_calls` response comes back.
 - **Drop page caches on all nodes before AND during load** (a 60 s loop) — GB10
   unified memory stalls big loads in kernel reclaim otherwise.
 - **Full Ray purge between image swaps** — `ray stop --force`, then
